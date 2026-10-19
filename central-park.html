@@ -1,0 +1,982 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Central Park Seasons</title>
+<style>
+  :root{--bg:#050403;--ink:#ecd6aa;--bar:rgba(232,190,110,.55);color-scheme:dark}
+  html,body{margin:0;height:100%;background:var(--bg);overflow:hidden}
+  #wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center}
+  #stage{position:relative;line-height:0}
+  canvas{display:block;cursor:pointer}
+  .nav{position:absolute;top:12px;right:12px;line-height:1.2;padding:7px 12px;border-radius:999px;
+       font:12px/1.2 system-ui,-apple-system,"Segoe UI",sans-serif;letter-spacing:.06em;text-decoration:none;
+       color:var(--ink);background:rgba(5,4,3,.55);border:1px solid rgba(232,190,110,.35);opacity:.8;transition:opacity .3s}
+  .nav:hover,.nav:focus-visible{opacity:1;outline:none;border-color:rgba(232,190,110,.8)}
+  #bar{position:absolute;left:0;bottom:0;height:2px;width:0;background:var(--bar)}
+  #hint{position:absolute;left:0;right:0;bottom:14px;text-align:center;
+        font:12px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif;letter-spacing:.08em;
+        color:var(--ink);opacity:.75;transition:opacity 1.2s;pointer-events:none}
+  #err{position:fixed;inset:0;display:none;align-items:center;justify-content:center;color:var(--ink);
+       font:14px system-ui,sans-serif;text-align:center;padding:24px}
+</style>
+</head>
+<body>
+<div id="wrap"><div id="stage"><canvas id="c"></canvas><a class="nav" href="index.html">← Tessera</a><div id="bar"></div>
+<div id="hint">click for sound &nbsp;·&nbsp; space pause &nbsp;·&nbsp; ← → seek &nbsp;·&nbsp; R restart</div></div></div>
+<div id="err"></div>
+<script>
+"use strict";
+// ============================================================================
+//  TESSERA: FOUR SEASONS. A year in Central Park as a loose-tile mosaic.
+//  Every tessera has two glass faces. A wave of flips turns the wall from one
+//  season to the next; people and animals are flocks of tiles that lift off,
+//  flip to show their other face, walk, swim and fly, then click back home.
+//  WebGL2 + plain JavaScript, no libraries, no image, font or audio files.
+// ============================================================================
+
+const DURATION = 80;
+const TAU = Math.PI*2;
+
+// ---------------------------------------------------------------- utilities
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);
+  t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+const rnd = mulberry32(19730405);
+const drng = mulberry32(1858);              // design-only randomness
+const clamp=(x,a,b)=>x<a?a:x>b?b:x;
+const sstep=(a,b,x)=>{const t=clamp((x-a)/(b-a),0,1);return t*t*(3-2*t);};
+const sstep5=t=>{t=clamp(t,0,1);return t*t*t*(t*(t*6-15)+10);};
+const mix=(a,b,t)=>a+(b-a)*t;
+const mixc=(a,b,t)=>[mix(a[0],b[0],t),mix(a[1],b[1],t),mix(a[2],b[2],t)];
+const shade=(c,k)=>[c[0]*k,c[1]*k,c[2]*k];
+function wrapP(a,p){ a=a%p; if(a>p*0.5)a-=p; else if(a<=-p*0.5)a+=p; return a; }
+function bump(t,a,b,c,d){ return sstep(a,b,t)*(1-sstep(c,d,t)); }
+function hh(a,b,c){ const v=Math.sin(a*127.1+b*311.7+c*74.7)*43758.5453; return v-Math.floor(v); }
+const lin=c=>[Math.pow(clamp(c[0],0,1),2.2),Math.pow(clamp(c[1],0,1),2.2),Math.pow(clamp(c[2],0,1),2.2)];
+
+// ---------------------------------------------------------------- the wall
+const N=72, NT=N*N, P=2/N, SP=P;
+const TS=P*0.86, TH=P*0.42;
+// season transitions: start times of the flip waves (spring is season 0 and returns at the end)
+const TRANS=[20,40,60,77.2];
+
+// ---- the scene: Central Park looking south across the Lake to Bow Bridge and the towers
+const SX=0.74, SYT=0.80, SYB=-0.53;
+const DEEP=[[0.11,0.27,0.16],[0.08,0.15,0.38],[0.32,0.10,0.07],[0.10,0.13,0.26]];
+const GOLD=[0.93,0.72,0.36];
+const SKY=[[0.95,0.84,0.58],[0.93,0.71,0.33],[0.92,0.58,0.36],[0.80,0.83,0.89]];
+const MEDS=[{x:-0.86,y:0.885,r:0.072,s:0},{x:0.86,y:0.885,r:0.072,s:1},{x:0.86,y:-0.745,r:0.1,s:2},{x:-0.86,y:-0.745,r:0.1,s:3}];
+const BLD=[[-0.74,-0.63,0.40],[-0.63,-0.56,0.31],[-0.56,-0.45,0.49],[-0.45,-0.39,0.35],[-0.39,-0.30,0.58,'step'],
+  [-0.30,-0.19,0.42],[-0.19,-0.13,0.68],[-0.13,0.02,0.37],[0.02,0.10,0.75,'tower'],[0.10,0.21,0.45],
+  [0.21,0.28,0.60,'spire'],[0.28,0.40,0.39],[0.40,0.50,0.53,'step'],[0.50,0.61,0.33],[0.61,0.74,0.44]];
+const BCOL=[[0.34,0.39,0.50],[0.38,0.43,0.52],[0.30,0.26,0.30],[0.17,0.21,0.32]];
+const WIN=[[0.66,0.78,0.92],[0.70,0.82,0.94],[0.80,0.52,0.32],[0.28,0.34,0.50]];
+const LIT=[0.08,0.05,0.18,0.5];
+const CROWNS=[];
+for (let k=0;k<11;k++) CROWNS.push({x:-0.70+k*0.14+(drng()-0.5)*0.04, y:0.12+drng()*0.06, r:0.095+drng()*0.035,
+  cherry:(k===1||k===5||k===8), a:k%3, w:drng()*6});
+
+function D(c,m,tag){ return {c,m:m||0,tag:tag||''}; }
+const gridRC=(x,y)=>[Math.floor((x+1)/P),Math.floor((y+1)/P)];
+
+function medallion(dx,dy,d,M,s){
+  const R=M.r*0.78, q=d/R, a=Math.atan2(dy,dx), on=M.s===s;
+  if (d>R) return D(on?GOLD:[0.40,0.33,0.22],on?1:0,'medal');
+  const ground=shade(DEEP[M.s],0.85);
+  if (M.s===0){ if (q<0.28) return D([0.98,0.82,0.25],0,'medal');
+    if (q<0.32+0.62*Math.abs(Math.cos(2.5*a))) return D(q>0.7?[0.99,0.9,0.94]:[0.96,0.62,0.74],0,'medal'); }
+  if (M.s===1){ if (q<0.45) return D([0.97,0.55,0.12],0,'medal'); if (Math.cos(8*a)>0.15&&q<0.95) return D([0.99,0.85,0.25],0,'medal'); }
+  if (M.s===2){ const aa=a-Math.PI/2;
+    if (Math.abs(dx)<P*0.5&&dy<0&&q<0.95) return D([0.42,0.25,0.12],0,'medal');
+    if (q<0.36+0.56*Math.abs(Math.cos(2.5*aa))&&dy>-R*0.35) return D(q<0.35?[0.95,0.5,0.12]:[0.82,0.16,0.08],0,'medal'); }
+  if (M.s===3){ if (q<0.22||(d*Math.abs(Math.sin(3*a))<P*0.55&&q<0.92)) return D([0.96,0.97,1.0],0,'medal'); }
+  return D(ground,0,'medal');
+}
+function frameBand(x,y,s,ci,ri){
+  const m=Math.max(Math.abs(x),Math.abs(y));
+  for (const M of MEDS){ const d=Math.hypot(x-M.x,y-M.y); if (d<M.r) return medallion(x-M.x,y-M.y,d,M,s); }
+  if (m>1-P*1.05) return D(shade(DEEP[s],0.45),0,'frame');
+  if (m>1-P*2.05) return D(GOLD,1,'frame');
+  const dist=Math.max(Math.abs(x)-SX,y-SYT,SYB-y);
+  if (dist<P*0.95) return D(GOLD,1,'frame');
+  return D(shade(DEEP[s],hh(ci,ri,7)<0.5?0.9:1.08),0,'frame');
+}
+function sky(x,y,s,ci,ri){
+  const k=0.96+0.08*hh(ci,ri,2);
+  if (s===0){
+    const d=Math.hypot(x,y-0.04);
+    if (d>0.60&&d<0.712){ const RB=[[0.36,0.30,0.70],[0.25,0.62,0.35],[0.98,0.86,0.30],[0.96,0.56,0.14]];
+      return D(RB[Math.min(3,Math.floor((d-0.60)/0.028))],0,'sky'); }
+    for (const [cx,cy,sc] of [[-0.5,0.70,0.7],[0.55,0.74,0.55]]){
+      const c=cloud(x,y,cx,cy,sc); if (c) return D(c===2?[0.62,0.70,0.84]:[0.97,0.97,0.95],0,'sky'); }
+  }
+  if (s===1){
+    const d=Math.hypot(x-0.52,y-0.66);
+    if (d<0.05) return D([0.99,0.86,0.30],0,'sky'); if (d<0.075) return D([0.96,0.50,0.12],0,'sky');
+    const c=cloud(x,y,-0.52,0.72,0.55); if (c) return D(c===2?[0.70,0.76,0.86]:[0.98,0.97,0.94],0,'sky');
+  }
+  if (s===2){ const d=Math.hypot(x+0.5,y-0.42); if (d<0.06) return D([0.98,0.62,0.18],0,'sky'); if (d<0.09) return D([0.86,0.24,0.10],0,'sky'); }
+  if (s===3){ const d=Math.hypot(x-0.5,y-0.68);
+    if (d<0.055) return D(hh(ci,ri,9)<0.25?[0.78,0.82,0.88]:[0.97,0.97,0.99],0,'sky'); }
+  const g=sstep(0.1,0.8,y);
+  return D(shade(mixc(mixc(SKY[s],[1,1,1],0.12),SKY[s],g),k),1,'sky');
+}
+function cloud(x,y,cx,cy,s){
+  let inside=false;
+  for (const q of [[0,0,0.09],[0.085,0.02,0.07],[-0.08,-0.01,0.065],[0.03,0.06,0.06]]){
+    const dx=x-(cx+q[0]*s), dy=y-(cy+q[1]*s); if (dx*dx+dy*dy<(q[2]*s)**2) inside=true; }
+  return inside ? (y<cy-0.03*s?2:1) : 0;
+}
+function skyline(x,y,s,ci,ri){
+  if (y<0.10) return null;
+  for (let b=0;b<BLD.length;b++){ const B=BLD[b]; if (x<B[0]||x>=B[1]) continue;
+    let top=B[2]; const u=(x-B[0])/(B[1]-B[0]);
+    if (B[3]==='step'&&(u<0.22||u>0.78)) top-=0.08;
+    if (B[3]==='tower'&&u>0.62) top-=0.11;
+    if (B[3]==='spire'){ const c=Math.abs(u-0.5)*2; top-=c*0.12; if (c<0.2) top+=0.07; }
+    if (y>top) return null;
+    const sh=b%2?0.8:1.12;
+    if (ci%2===0&&ri%2===1&&y<top-P*0.8&&(B[3]!=='spire'||y<top-0.12)){
+      if (hh(ci,ri,11)<LIT[s]) return D([0.99,0.80,0.42],1,'bld');
+      return D(shade(WIN[s],sh),0,'bld'); }
+    return D(shade(BCOL[s],sh),0,'bld');
+  }
+  return null;
+}
+function trees(x,y,s,ci,ri,lakeTop){
+  for (const C of CROWNS){
+    const dx=x-C.x, dy=y-C.y, d=Math.hypot(dx,dy*1.15), a=Math.atan2(dy,dx);
+    if (s!==3 && d<C.r*(0.93+0.09*Math.sin(a*5+C.w))){
+      const hi=(dx*-0.6+dy*0.8)>C.r*0.35, sp=hh(ci,ri,13);
+      let c;
+      if (s===0) c=C.cherry ? (sp<0.3?[0.99,0.93,0.95]:[0.96,0.68,0.78]) : (sp<0.25?[0.72,0.86,0.42]:[0.52,0.74,0.32]);
+      else if (s===1) c=sp<0.3?[0.14,0.36,0.16]:[0.22,0.48,0.20];
+      else { const A=[[0.94,0.50,0.12],[0.78,0.16,0.08],[0.96,0.78,0.22]];
+        c = sp<0.18 ? A[(C.a+1)%3] : (sp<0.25?[0.50,0.30,0.14]:A[C.a]); }
+      if (hi) c=mixc(c,[1,0.97,0.8],0.18);
+      return D(c,0,'canopy');
+    }
+    if (s===3 && d<C.r){
+      const bx=dx, by=y-(C.y-C.r*0.75), ang=Math.atan2(by,bx), rad=Math.hypot(bx,by);
+      if (by>0 && Math.abs(Math.sin(ang*3.5+rad*9+C.w))*rad<P*0.55)
+        return D(hh(ci,ri,17)<0.4?[0.96,0.97,1.0]:[0.30,0.22,0.16],0,'canopy');
+    }
+    if (Math.abs(dx)<P*0.7 && y>lakeTop && y<C.y-C.r*0.45) return D([0.32,0.22,0.15],0,'trunk');
+  }
+  return null;
+}
+function bridge(x,y,s,ci,ri){
+  // Bow Bridge: a shallow cream cast-iron arch with an open balustrade
+  const W=0.42, ax=Math.abs(x), cream=[0.99,0.91,0.70], snow=[0.96,0.97,1.0];
+  const yd=v=>-0.12+0.11*(1-(v/W)**2);
+  if (ax>=W&&ax<W+0.05){ if (y<yd(W)+P*0.6&&y>-0.33) return D(hh(ci,ri,4)<0.3?[0.58,0.54,0.50]:[0.46,0.43,0.40],0,'bridge'); return null; }
+  if (ax>=W) return null;
+  const top=yd(x), ya=-0.27+0.16*(1-(x/W)**2);
+  if (y>top&&y<=top+P*1.7){ if (y>top+P*0.95) return D(s===3?snow:cream,0,'bridge'); return ci%2===0?D(cream,0,'bridge'):null; }
+  if (y<=top&&y>top-P) return D(cream,0,'bridge');
+  if (y<=top-P&&y>ya) return null;
+  if (y<=ya&&y>ya-P) return D(cream,0,'bridge');
+  return null;
+}
+function water(x,y,s,ci,ri,lakeTop){
+  if (s===3){
+    if (Math.abs(Math.sin(x*23+Math.sin(y*31)*2)+Math.sin(y*17-x*7))<0.09) return D([0.56,0.65,0.76],0,'lake');
+    return D(hh(ci,ri,3)<0.5?[0.87,0.92,0.97]:[0.75,0.84,0.93],0,'lake');
+  }
+  const base=[[0.22,0.48,0.64],[0.13,0.42,0.60],[0.10,0.20,0.40]][s];
+  const depth=lakeTop-y;
+  if (depth<0.15){ const t=trees(x,2*lakeTop-y,s,ci,ri,-9);
+    if (t && hh(ci,ri,5)<0.85-depth*4) return D(shade(mixc(t.c,base,0.45),0.72),0,'lake'); }
+  const fr=y*14+0.4*Math.sin(x*9); if (fr-Math.floor(fr)<0.07) return D(mixc(base,[0.55,0.85,0.98],0.4),0,'lake');
+  return D(shade(base,0.92+0.16*hh(ci,ri,6)),0,'lake');
+}
+function lawn(x,y,s,ci,ri){
+  const pc=-0.44+0.05*Math.sin(x*3.2+0.5), r=hh(ci,ri,21);
+  if (Math.abs(y-pc)<P*0.8) return D(s===3?[0.64,0.58,0.52]:[0.78,0.73,0.62],0,'lawn');
+  if (s===0){ if (r<0.06) return D([0.98,0.84,0.22],0,'lawn'); if (r<0.11) return D(r<0.085?[0.90,0.18,0.20]:[0.96,0.56,0.70],0,'lawn');
+    return D(r<0.5?[0.38,0.66,0.27]:[0.46,0.72,0.31],0,'lawn'); }
+  if (s===1){
+    for (const [bx,by,c] of [[-0.36,-0.48,[0.85,0.15,0.12]],[0.4,-0.385,[0.2,0.35,0.75]]])
+      if (Math.abs(x-bx)<0.065&&Math.abs(y-by)<0.035) return D((ci+ri)%2?c:[0.96,0.95,0.92],0,'lawn');
+    return D(Math.floor((x+2)/0.1)%2?[0.23,0.50,0.19]:[0.28,0.56,0.22],0,'lawn'); }
+  if (s===2){ const L=[[0.94,0.50,0.12],[0.80,0.18,0.08],[0.95,0.78,0.22],[0.50,0.30,0.14]];
+    if (r<0.3) return D(L[Math.floor(r/0.075)],0,'lawn'); return D(r<0.65?[0.43,0.48,0.21]:[0.50,0.53,0.25],0,'lawn'); }
+  return D(r<0.6?[0.94,0.95,0.98]:[0.80,0.86,0.94],0,'lawn');
+}
+function scene(x,y,s,ci,ri){
+  const lakeTop=-0.02+0.012*Math.sin(x*9), lakeBot=-0.34+0.02*Math.sin(x*6+1);
+  if (Math.abs(x+0.64)<P*0.55&&y<-0.12) return D([0.12,0.22,0.16],0,'lamp');
+  if (Math.abs(x+0.64)<P*1.2&&y>=-0.12&&y<-0.05) return D(s>=2?[0.99,0.82,0.45]:[0.92,0.93,0.90],s>=2?1:0,'lamp');
+  if (y<lakeBot) return lawn(x,y,s,ci,ri);
+  const br=bridge(x,y,s,ci,ri); if (br) return br;
+  if (y<lakeTop) return water(x,y,s,ci,ri,lakeTop);
+  if (y<lakeTop+0.025+0.012*Math.sin(x*13)){
+    if (s===3&&y>lakeTop+0.01) return D([0.95,0.96,0.99],0,'rock');
+    return D(hh(ci,ri,8)<0.5?[0.33,0.32,0.33]:[0.44,0.43,0.44],0,'rock'); }
+  const tr=trees(x,y,s,ci,ri,lakeTop); if (tr) return tr;
+  if (y<0.085+0.02*Math.sin(x*17)){ // shrubs along the far shore
+    const r=hh(ci,ri,19), SH=[[[0.22,0.44,0.20],[0.30,0.52,0.24]],[[0.10,0.28,0.11],[0.16,0.36,0.15]],
+      [[0.46,0.30,0.12],[0.60,0.36,0.12]],[[0.86,0.89,0.94],[0.32,0.28,0.25]]][s];
+    return D(r<(s===3?0.65:0.5)?SH[0]:SH[1],0,'shrub'); }
+  const bd=skyline(x,y,s,ci,ri); if (bd) return bd;
+  return sky(x,y,s,ci,ri);
+}
+function design(x,y,s){
+  const [ci,ri]=gridRC(x,y);
+  if (Math.abs(x)<SX&&y<SYT&&y>SYB) return scene(x,y,s,ci,ri);
+  return frameBand(x,y,s,ci,ri);
+}
+
+// ---- tiles
+const hx=new Float32Array(NT),hy=new Float32Array(NT),hz=new Float32Array(NT);
+const hrx=new Float32Array(NT),hry=new Float32Array(NT),hrz=new Float32Array(NT);
+const px=new Float32Array(NT),py=new Float32Array(NT),pz=new Float32Array(NT);
+const vx=new Float32Array(NT),vy=new Float32Array(NT),vz=new Float32Array(NT);
+const arx=new Float32Array(NT),ary=new Float32Array(NT),arz=new Float32Array(NT);
+const wx=new Float32Array(NT),wy=new Float32Array(NT),wz=new Float32Array(NT);
+const tau=new Float32Array(NT),tumPsi=new Float32Array(NT),spin=new Float32Array(NT),swirlS=new Float32Array(NT);
+const flash=new Float32Array(NT), ret=new Uint8Array(NT);
+const ownPrev=new Int16Array(NT), ownNow=new Int16Array(NT), slotOf=new Int32Array(NT);
+const protect=new Uint8Array(NT), canopyA=new Uint8Array(NT), lakeT=new Uint8Array(NT);
+// two faces per tile, each rgb + metal flag; which face is "home", and the flip angle that shows it
+const faces=new Float32Array(NT*8), hFace=new Uint8Array(NT), ryBase=new Float32Array(NT);
+const seasonOf=new Uint8Array(NT), lastFlip=new Float32Array(NT), flipT=new Float32Array(NT*4);
+const SC=[0,1,2,3].map(()=>new Float32Array(NT*4));
+const designTex=[0,1,2,3].map(()=>new Uint8Array(NT*4));
+const stat=new Float32Array(NT*4);
+let facesDirty=true;
+
+for (let j=0;j<N;j++) for (let i=0;i<N;i++){
+  const k=j*N+i;
+  const x=-1+(i+0.5)*P+((j&1)?0.22:-0.22)*P+(rnd()-0.5)*0.12*P;
+  const y=-1+(j+0.5)*P+(rnd()-0.5)*0.12*P;
+  hx[k]=x; hy[k]=y; hz[k]=TH*0.5+rnd()*0.0015;
+  hrx[k]=(rnd()-0.5)*0.1; hry[k]=(rnd()-0.5)*0.1; hrz[k]=(rnd()-0.5)*0.16;
+  for (let s=0;s<4;s++){
+    const d=design(x,y,s), b=0.9+0.2*hh(k,s,1), hue=(hh(k,s,2)-0.5)*0.05;
+    const L=lin([d.c[0]*b+hue,d.c[1]*b,d.c[2]*b-hue]);
+    SC[s][k*4]=L[0]; SC[s][k*4+1]=L[1]; SC[s][k*4+2]=L[2]; SC[s][k*4+3]=d.m;
+    designTex[s][k*4]=d.c[0]*255; designTex[s][k*4+1]=d.c[1]*255; designTex[s][k*4+2]=d.c[2]*255; designTex[s][k*4+3]=255;
+    if (d.tag==='medal'||d.tag==='bridge'||d.tag==='lamp') protect[k]=1;
+    if (s===2&&d.tag==='canopy') canopyA[k]=1;
+    if (s===0&&d.tag==='lake') lakeT[k]=1;
+  }
+  stat[k*4]=TS*(0.93+0.1*rnd()); stat[k*4+1]=TH*(0.9+0.2*rnd()); stat[k*4+2]=rnd();
+  tumPsi[k]=rnd()*TAU; spin[k]=(rnd()<0.5?-1:1)*(7+9*rnd()); swirlS[k]=(rnd()<0.5?-1:1)*(0.6+rnd());
+  const r=Math.hypot(x,y);
+  flipT[k]      =TRANS[0]+(x+1)/2*2.6+rnd()*0.35;            // summer arrives from the east
+  flipT[NT+k]   =TRANS[1]+(1-y)/2*2.6+rnd()*0.4;             // autumn turns from the crowns down
+  flipT[2*NT+k] =TRANS[2]+(1-y)/2*1.8+rnd()*1.4;             // winter settles like snow
+  flipT[3*NT+k] =TRANS[3]+r*0.85+rnd()*0.2;                  // spring blooms from the centre
+}
+
+// ---------------------------------------------------------------- sprites
+const COLK={k:[.08,.08,.09],w:[.94,.93,.89],s:[.94,.76,.63],S:[.74,.52,.37],D:[.45,.30,.20],h:[.40,.24,.13],
+  H:[.10,.08,.07],y:[.93,.79,.42],g:[.56,.56,.59],n:[.12,.16,.36],j:[.30,.43,.64],r:[.80,.12,.10],o:[.95,.50,.12],
+  Y:[.98,.83,.20],G:[.20,.53,.26],b:[.46,.28,.15],B:[.80,.64,.42],p:[.96,.50,.66],P:[.52,.26,.62],c:[.55,.76,.93],
+  t:[.87,.76,.52],q:[.12,.33,.24],R:[.88,.10,.12],'|':[.10,.10,.10]};
+const SPR={
+  trench:{kind:'person',legsFrom:12,rows:["...rrr...",".rrrrrrr.","rrrrrrrrr","....k....","...hhh...","..hsssh..","...sss...",
+    "..BBBBB..",".BBBBBBB.",".BBbbbBB.",".BBBBBBB.","..BBBBB..","..BB.BB..","..ss.ss..","..ss.ss..","..kk.kk.."]},
+  jogger:{kind:'person',legsFrom:10,arms:[5,8],rows:["...HHH...","..HSSSH..","...SSS.H.","...SSS...","..ppppp..",".ppppppp.",
+    ".ppwpppp.",".ppppppp.",".S.ppp.S.","..kkkkk..","..kk.kk..","..kk.kk..","..kk.kk..","..ww.ww.."]},
+  rainman:{kind:'person',legsFrom:9,arms:[4,8],rows:["...hhh...","..hssss..","...sss...","..ccccc..",".ccccccc.",".ccwcccc.",
+    ".ccwcccc.",".ccccccc.",".s.jjj.s.","..jj.jj..","..jj.jj..","..jj.jj..","..jj.jj..","..bb.bb.."]},
+  dog:{kind:'side',legsFrom:3,rows:["......bb.","b....bbbk",".bbbbbbb.",".b.b..b.b"],pal:{b:[.62,.42,.24]}},
+  robin:{kind:'side',rows:["...gg..","..ggkgY","gggoooo",".gooooo","..ooo..","...Y.Y."],pal:{g:[.40,.36,.33],o:[.90,.42,.14]}},
+  drake:{kind:'side',rows:[".......GG..","......GGkYY","......wG...","kgggggbbb..",".ggggggbb..","..ggggg...."],
+    pal:{G:[.08,.40,.22],g:[.72,.72,.70],b:[.48,.22,.12]}},
+  hen:{kind:'side',rows:[".......bb..","......btkoo","..tbtbtbb..","btbtbtbtb..",".btbtbtb..."],pal:{b:[.42,.27,.15],t:[.66,.50,.32]}},
+  duckling:{kind:'side',rows:["..YY.","YYYko",".YYY."],pal:{Y:[.92,.78,.30]}},
+  boat:{kind:'side',oars:[[6,4.6],[15,4.6]],rows:["...HHH.......yyy...","..HsssH.....ysssy..","...sss.......sss...",
+    "..rrrrr.....YYYYY..","..rrrrr.....YYYYY..","qqqqqqqqqqqqqqqqqqq",".qwwwwwwwwwwwwwwwq.","..qqqqqqqqqqqqqqq.."]},
+  sundress:{kind:'person',legsFrom:11,arms:[6,7],rows:["..ttttt..","ttttrtttt","..HSSSH..","...SSS...","...SSS...","..YYYYY..",
+    ".SYYYYYS.",".SYYYYYS.","..YYYYY..",".YYYYYYY.","YYYYYYYYY","..SS.SS..","..SS.SS..","..rr.rr.."]},
+  tshirt:{kind:'person',legsFrom:10,arms:[5,7],rows:["...HHH...","..HDDDH..","...kkk...","...DDD...","..wwwww..",".wwwwwww.",
+    ".DwwwwwD.",".DwwwwwD.","..wwwww..","..rrrrr..","..rr.rr..","..DD.DD..","..DD.DD..","..ww.ww.."]},
+  balloonkid:{kind:'person',legsFrom:11,sway:'R|',rows:["......RRR",".....RRRRR",".....RRRRR","......RRR.",".......|..",
+    "...yy..|..","..yssy.|..","...ss..|..","..GGGGGs..",".sGGGGG...","..GGGGG...","..jj.jj...","..ss.ss...","..ww.ww..."]},
+  hawk:{kind:'top',body:2,rows:["........b........",".......bwb.......","...bbbbbbbbbbb...",".bbbbbbbwbbbbbbb.",
+    "bbbtbbbbwbbbbtbbb","kbb..bbbwbbb..bbk","k.....bbwbb.....k","......rrrrr......",".......rrr......."],
+    pal:{b:[.46,.31,.20],t:[.78,.66,.50],r:[.80,.32,.14]}},
+  monarch:{kind:'top',body:0,rows:["koo.ook","oookooo","okokoko",".ookoo.",".kw.wk."]},
+  goose:{kind:'top',body:1,rows:[".....k.....","....wkw....",".....k.....","..bbbbbbb..","bbbbbbbbbbb","kb..bbb..bk",".....k.....",".....w....."],
+    pal:{b:[.52,.44,.36]}},
+  squirrel:{kind:'side',rows:[".gg......","ggg......","gg....gg.","gg...gggk",".gg.ggggb","..ggggggb","..ggwgg..","...g..g.."],
+    pal:{g:[.56,.54,.53],b:[.52,.34,.16]}},
+  runner:{kind:'person',legsFrom:9,arms:[5,7],rows:["...HHH...","..HDDDH..","...DDD...","...DDD...","..ooooo..",".DowwwoD.",
+    ".DowkwoD.","..owwwo..","..kkkkk..","..DD.DD..","..DD.DD..","..DD.DD..","..cc.cc.."]},
+  camel:{kind:'person',legsFrom:10,arms:[5,8],rows:["...yyy...","..yssssy.","..ysssy..","..rkrkr..","..BrkrB..",".BBBBBBB.",
+    ".BBBBBBB.",".BBBBBBB.",".sBBBBBs.","..BBBBB..","..kk.kk..","..kk.kk..","..bb.bb..","..bb.bb.."]},
+  peacoat:{kind:'person',legsFrom:11,arms:[5,9],rows:["..ggggg..","...hhh...","..hssss..","...sss...","..rrrrr..",".nnrnnnn.",
+    ".nnrnwnn.",".nnnnwnn.",".nnnnnnn.",".snnnnns.","..nnnnn..","..gg.gg..","..gg.gg..","..kk.kk.."]},
+  puffer:{kind:'person',legsFrom:13,arms:[7,11],rows:["....r....","...rrr...","..rwrwr..","..rrrrr..","...SSS...","...SSS...",
+    "..YYYYY..",".kkkkkkk.",".ggggggg.",".kkkkkkk.",".ggggggg.",".rkkkkkr.","..kkkkk..","..jj.jj..","..jj.jj..","..bb.bb.."],
+    pal:{g:[.32,.32,.36]}},
+  snowkid:{kind:'person',legsFrom:9,arms:[5,7],rows:["...ccc...","..ccccc..","...sss...","...sss...","..PPPPP..",".PPPPPPP.",
+    ".PPPPPPP.",".cPPPPPc.","..PPPPP..","..PP.PP..","..PP.PP..","..kk.kk.."]},
+  sled:{kind:'side',rows:["bbb.......","...brrrrrr","....k....k","...kkkkkkk"]},
+  skater1:{kind:'person',legsFrom:10,arms:[5,8],rows:["...www...","..wwwww..","...sss...","...sss...","..rrrrr..",".rrrrrrr.",
+    ".rrwrrrr.",".rrwrrrr.",".srrrrrs.","..rrrrr..","..kk.kk..","..kk.kk..","..ww.ww..","..gg.gg.."]},
+  skater2:{kind:'person',legsFrom:9,arms:[4,7],rows:["...hhh...","..hssss..","..hsss...","..YYYYY..",".GGYGGGG.",".GGYGGGG.",
+    ".GGGGGGG.",".sGGGGGs.","..GGGGG..","..nn.nn..","..nn.nn..","..ww.ww..","..gg.gg.."]},
+  cardinal:{kind:'side',rows:["....r..","...rrr.","...rkko","rrrrrr.",".rrrrr.","..rrr..","...k.k."],pal:{r:[.84,.10,.10]}},
+};
+function spriteSlots(def){
+  const rows=def.rows, h=rows.length, w=Math.max(...rows.map(r=>r.length));
+  const cc=(w-1)/2, rc=(h-1)/2, out=[];
+  for (let r=0;r<h;r++){
+    const row=rows[r]; let minC=99,maxC=-1,legIdx=0;
+    for (let c=0;c<row.length;c++) if (row[c]!=='.'){ minC=Math.min(minC,c); maxC=Math.max(maxC,c); }
+    for (let c=0;c<row.length;c++){
+      const ch=row[c]; if (ch==='.') continue;
+      const col=(def.pal&&def.pal[ch])||COLK[ch];
+      let part=0;
+      if (def.sway&&def.sway.includes(ch)) part=7;
+      else if (def.kind==='person'){
+        if (r>=def.legsFrom) part=c<cc?1:2;
+        else if (def.arms&&r>=def.arms[0]&&r<=def.arms[1]){ if (c===minC) part=3; else if (c===maxC) part=4; }
+      } else if (def.kind==='side'){ if (def.legsFrom!=null&&r>=def.legsFrom) part=1+(legIdx++%2); }
+      else if (def.kind==='top'){ if (Math.abs(c-cc)>def.body) part=c<cc?5:6; }
+      out.push({lx:(c-cc)*SP, ly:(rc-r)*SP, r, part, col:lin(col)});
+    }
+  }
+  if (def.oars) for (const [oc,orow] of def.oars) for (let d=1;d<=6;d++)
+    out.push({lx:0,ly:0,r:0,part:8,px:(oc-cc)*SP,py:(rc-orow)*SP,d,col:lin([.82,.68,.44])});
+  out.h=h; out.w=w;
+  return out;
+}
+
+// ---------------------------------------------------------------- recruiting
+const busyUntil=new Float32Array(NT).fill(-10);
+function recruit(slots,ox,oy,tStart,tFree){
+  const cand=[];
+  for (let i=0;i<NT;i++) if (!protect[i]&&busyUntil[i]<tStart-0.3) cand.push(i);
+  cand.sort((a,b)=>((hx[a]-ox)**2+(hy[a]-oy)**2)-((hx[b]-ox)**2+(hy[b]-oy)**2));
+  const pool=cand.slice(0,slots.length*5);
+  for (let q=pool.length-1;q>0;q--){ const r=Math.floor(rnd()*(q+1)); [pool[q],pool[r]]=[pool[r],pool[q]]; }
+  const take=pool.slice(0,slots.length);
+  // coherent mapping: sort both by angle about their centroids
+  const ang=(xs,ys)=>{let mx=0,my=0;for(let q=0;q<xs.length;q++){mx+=xs[q];my+=ys[q];}mx/=xs.length;my/=xs.length;
+    return xs.map((_,q)=>Math.atan2(ys[q]-my,xs[q]-mx));};
+  const sx=slots.map(s=>s.part===8?s.px:s.lx), sy=slots.map(s=>s.part===8?s.py:s.ly);
+  const sa=ang(sx,sy), ta=ang(take.map(i=>hx[i]),take.map(i=>hy[i]));
+  const si=slots.map((_,q)=>q).sort((a,b)=>sa[a]-sa[b]), ti=take.map((_,q)=>q).sort((a,b)=>ta[a]-ta[b]);
+  const tiles=new Int32Array(slots.length);
+  for (let q=0;q<si.length;q++){ tiles[si[q]]=take[ti[q]]; busyUntil[take[ti[q]]]=tFree; }
+  return tiles;
+}
+
+// ---------------------------------------------------------------- figures
+const FIGS=[];
+const O={x:0,y:0,z:0,rx:0,ry:0,rz:0,k:150};
+const TMP=[0,0],TMP2=[0,0];
+
+function makeBody(path){
+  const b={cx:0,cy:0,th:0,init:false};
+  b.reset=()=>{b.init=false;};
+  b.update=(t,dt)=>{
+    path(t,TMP); b.cx=TMP[0]; b.cy=TMP[1];
+    path(t+0.05,TMP2); let dx=TMP2[0]-TMP[0], dy=TMP2[1]-TMP[1];
+    if (dx*dx+dy*dy<1e-10){ for(let s=0.1;s<6&&dx*dx+dy*dy<1e-10;s+=0.1){path(t+s,TMP2);dx=TMP2[0]-TMP[0];dy=TMP2[1]-TMP[1];} }
+    let th=Math.atan2(dy,dx);
+    if (!b.init){ b.th=th; b.init=true; }
+    b.th += wrapP(th-b.th,TAU)*Math.min(1,dt*6);
+  };
+  return b;
+}
+function placeSprite(s,Q,o){
+  let lx=s.lx, ly=s.ly, z=Q.z, rx=0, ry=0;
+  const ph=Q.ph, g=Q.gait;
+  if (g==='walk'||g==='run'){
+    const run=g==='run', A=run?1.3:0.8, Ar=run?0.9:0.5;
+    ly+=(run?0.4:0.2)*SP*Math.abs(Math.cos(ph));
+    if (s.part===1){ const u=Math.max(0,Math.sin(ph)); ly+=A*SP*u; z+=0.02*u; rx=-0.5*u; }
+    else if (s.part===2){ const u=Math.max(0,-Math.sin(ph)); ly+=A*SP*u; z+=0.02*u; rx=-0.5*u; }
+    else if (s.part===3) ly+=Ar*SP*Math.max(0,-Math.sin(ph));
+    else if (s.part===4) ly+=Ar*SP*Math.max(0,Math.sin(ph));
+  } else if (g==='skate'){
+    lx+=0.5*SP*Math.sin(ph);
+    if (s.part===1){ const u=Math.max(0,Math.sin(ph)); lx-=1.5*SP*u; ly+=0.4*SP*u; }
+    if (s.part===2){ const u=Math.max(0,-Math.sin(ph)); lx+=1.5*SP*u; ly+=0.4*SP*u; }
+    if (s.part===3){ lx-=0.9*SP; ly+=0.4*SP; } if (s.part===4){ lx+=0.9*SP; ly+=0.4*SP; }
+  } else if (g==='hop'){ ly+=2.2*SP*Math.pow(Math.max(0,Math.sin(ph)),0.6); }
+  else if (g==='quad'){ ly+=0.15*SP*Math.abs(Math.cos(ph));
+    if (s.part===1) ly+=0.6*SP*Math.max(0,Math.sin(ph)); if (s.part===2) ly+=0.6*SP*Math.max(0,-Math.sin(ph)); }
+  else if (g==='swim'){ ly+=0.3*SP*Math.sin(ph); }
+  else if (g==='row'){ ly+=0.15*SP*Math.sin(ph);
+    if (s.part===8){ const a=-Math.PI/2-0.5+0.6*Math.sin(ph); lx=s.px+Math.cos(a)*s.d*SP; ly=s.py+Math.sin(a)*s.d*SP; } }
+  if (s.part===7) lx+=1.1*SP*Math.sin(Q.t*1.3)*Math.max(0,8-s.r)/8;
+  if (g==='fly'&&(s.part===5||s.part===6)){
+    const sg=s.part===6?1:-1, e=Math.abs(lx)-Q.bodyHalf, phi=Q.flapA*Math.sin(ph-e*Q.lag);
+    lx=sg*(Q.bodyHalf+e*Math.cos(phi)); z+=e*Math.sin(phi); ry=sg*phi;
+  }
+  if (Q.top){
+    const a=Q.th-Math.PI/2, c=Math.cos(a), sn=Math.sin(a);
+    o.x=Q.cx+c*lx-sn*ly; o.y=Q.cy+sn*lx+c*ly; o.z=z; o.rz=a; o.rx=0; o.ry=ry;
+  } else {
+    o.x=Q.cx+lx*Q.face; o.y=Q.cy+ly; o.z=z; o.rz=g==='swim'?0.05*Math.sin(ph):0; o.rx=rx; o.ry=0;
+  }
+}
+// add one sprite figure. path(t,o) gives its centre; t0 = first launch, t1 = first release
+function addSprite(def,path,t0,t1,opt){
+  opt=opt||{};
+  const slots=spriteSlots(SPR[def]);
+  const top=SPR[def].kind==='top';
+  const body=top?makeBody(path):null;
+  const Q={cx:0,cy:0,z:opt.z||0.14,ph:opt.ph0||0,gait:opt.gait||'walk',face:1,th:0,top,
+    flapA:opt.flapA||0.8,bodyHalf:((SPR[def].body||0)+0.5)*SP,lag:opt.lag||2.5,t:0};
+  path(t0,TMP); const ox=TMP[0], oy=TMP[1];
+  path(t1,TMP2); const face0=opt.face||(SPR[def].kind==='side'?(TMP2[0]>=ox?1:-1):1);
+  const tiles=recruit(slots,ox,oy,t0,t1+3.5);
+  const launch=new Float32Array(slots.length), release=new Float32Array(slots.length);
+  slots.forEach((s,j)=>{ const i=tiles[j]; const d=Math.hypot(hx[i]-ox-s.lx,hy[i]-oy-s.ly);
+    launch[j]=t0+0.1+d*0.8+rnd()*0.5; release[j]=t1+rnd()*0.8; });
+  let lastX=null;
+  const F={slots,tiles,launch,release,tA:t0,tB:t1+0.9,keep:false,
+    reset(){ Q.ph=opt.ph0||0; Q.face=face0; lastX=null; if(body) body.reset(); },
+    prep(t,dt){
+      Q.t=t;
+      if (body){ body.update(t,dt); Q.cx=body.cx; Q.cy=body.cy; Q.th=body.th; Q.ph+=dt*(opt.flapW||9); return; }
+      path(t,TMP);
+      if (lastX!==null){ const dx=TMP[0]-lastX;
+        if (opt.timePhase) Q.ph+=dt*opt.timePhase; else Q.ph+=Math.abs(dx)/(opt.stride||0.1)*TAU;
+        if (SPR[def].kind==='side'&&Math.abs(dx)>1e-5) Q.face=dx>0?1:-1; }
+      lastX=TMP[0]; Q.cx=TMP[0]; Q.cy=TMP[1];
+    },
+    target(j,t,o){ placeSprite(slots[j],Q,o); o.k=160; }};
+  F.reset();
+  FIGS.push(F);
+}
+// a straight walk: form at x0 from t0, start moving at tm, arrive at x1 at te
+const walk=(x0,x1,y,tm,te)=>(t,o)=>{ const u=clamp((t-tm)/(te-tm),0,1); o[0]=mix(x0,x1,u); o[1]=y; return o; };
+const footY=(def)=>-0.935+(SPR[def].rows.length-1)/2*SP;
+const bandY=(def)=>0.845+(SPR[def].rows.length-1)/2*SP*0.5;
+
+// ---- SPRING  (0 – 20s): rain, robins, mallards, umbrellas
+addSprite('trench',walk(-0.6,0.6,footY('trench'),4.5,17),2.6,17.2,{gait:'walk',stride:0.11});
+addSprite('jogger',walk(-0.62,0.62,footY('jogger'),8.5,14.5),6.6,14.6,{gait:'run',stride:0.16,z:0.18});
+addSprite('rainman',walk(0.6,-0.45,footY('rainman'),5.2,16.8),3.2,17,{gait:'walk',stride:0.11,z:0.12});
+addSprite('dog',walk(0.42,-0.63,-0.935+1.5*SP,5.2,16.8),3.2,17,{gait:'quad',stride:0.07,z:0.12});
+addSprite('robin',walk(-0.62,0.45,bandY('robin'),5,15),3.4,15.6,{gait:'hop',stride:0.07});
+addSprite('robin',walk(-0.48,0.62,bandY('robin'),7,17),5.4,17.4,{gait:'hop',stride:0.06,ph0:1.5});
+(function(){ const ducks=[['drake',0],['hen',0.17],['duckling',0.3],['duckling',0.37],['duckling',0.44],['duckling',0.51]];
+  ducks.forEach(([d,off],k)=>addSprite(d,(t,o)=>{ walk(0.42+off,-0.62+off,-0.25,5,17)(t,o);
+      o[1]+=0.012*Math.sin(t*1.3+k)+(k>1?-0.03:0); return o; },3+k*0.15,17.2,{gait:'swim',timePhase:4,ph0:k,z:0.1}));
+})();
+
+// ---- SUMMER (20 – 40s): rowboats, the red-tailed hawk, monarchs, sundresses
+addSprite('boat',walk(0.42,-0.42,-0.215,25,37),23,37.3,{gait:'row',timePhase:3.2,z:0.1});
+addSprite('hawk',(t,o)=>{ const a=sstep(25,26.5,t)*(t-25)*0.42; o[0]=-0.1+0.26*Math.cos(a+0.6)+0.02*(t-25);
+  o[1]=0.52+0.18*Math.sin(a+0.6); return o; },23.2,37.2,{z:0.3,flapA:0.25,flapW:2.2,lag:0.5});
+addSprite('sundress',walk(-0.6,0.55,footY('sundress'),25.3,37.4),23.3,37.6,{gait:'walk',stride:0.11});
+addSprite('tshirt',walk(0.6,-0.6,footY('tshirt'),26,37.6),24,37.8,{gait:'walk',stride:0.12,z:0.17});
+addSprite('balloonkid',walk(-0.62,0.3,footY('balloonkid'),28,36.5),26,36.8,{gait:'walk',stride:0.08,z:0.2});
+[[-0.86,-0.35,0.62,26,35],[0.86,-0.3,0.65,27.5,37],[0.15,-0.42,0.05,28.5,36.5]].forEach(([bx,y0,y1,tm,te],k)=>
+  addSprite('monarch',(t,o)=>{ const u=clamp((t-tm)/(te-tm),0,1); o[0]=bx+0.05*Math.sin(t*1.9+k*2)*(k===2?3:1);
+    o[1]=mix(y0,y1,u)+0.03*Math.sin(t*3.1+k); return o; },tm-2,te,{z:0.22,flapA:1.25,flapW:16,lag:0}));
+
+// ---- AUTUMN (40 – 60s): falling leaves, Canada geese, squirrels, coats and the marathon
+(function(){
+  const V=[[0,0],[0.17,0.12],[0.17,-0.12],[0.34,0.24],[0.34,-0.24]];
+  V.forEach(([back,lat],k)=>addSprite('goose',(t,o)=>{ const u=clamp((t-44)/(54-44),0,1);
+    o[0]=mix(0.45,-0.75,u)+back; o[1]=0.52+lat+0.012*Math.sin(t*1.7+k)+(t-44)*0.006; return o; },
+    42.3+k*0.12,54.2,{z:0.28,flapA:0.7,flapW:7,ph0:k*0.6,lag:2}));
+})();
+addSprite('squirrel',walk(-0.6,0.6,bandY('squirrel'),45,55),43.2,55.4,{gait:'hop',stride:0.09});
+addSprite('squirrel',walk(0.62,-0.2,bandY('squirrel'),48,56),46.2,56.2,{gait:'hop',stride:0.08,ph0:2});
+addSprite('runner',walk(0.62,-0.62,footY('runner'),45.5,51),43.6,51.2,{gait:'run',stride:0.17,z:0.19});
+addSprite('camel',walk(-0.45,0.6,footY('camel'),45,57),43,57.2,{gait:'walk',stride:0.11});
+addSprite('peacoat',walk(-0.65,0.4,footY('peacoat'),45,57),43,57.2,{gait:'walk',stride:0.11,ph0:Math.PI,z:0.12});
+// the leaves let go of the crowns, flutter down and lie on the lawn until the snow
+(function(){
+  const cand=[]; for (let i=0;i<NT;i++) if (canopyA[i]) cand.push(i);
+  for (let q=cand.length-1;q>0;q--){ const r=Math.floor(rnd()*(q+1)); [cand[q],cand[r]]=[cand[r],cand[q]]; }
+  const tiles=Int32Array.from(cand.slice(0,120)), n=tiles.length;
+  const slots=[], launch=new Float32Array(n), release=new Float32Array(n);
+  const fd=new Float32Array(n), gx=new Float32Array(n), gy=new Float32Array(n), ph=new Float32Array(n), rr=new Float32Array(n);
+  for (let j=0;j<n;j++){ const i=tiles[j]; slots.push({});
+    launch[j]=45.5+rnd()*7; fd[j]=3.2+rnd()*2.6; gx[j]=clamp(hx[i]+(rnd()-0.4)*0.3,-0.7,0.7); gy[j]=-0.50+rnd()*0.13;
+    ph[j]=rnd()*TAU; rr[j]=(rnd()-0.5)*3; release[j]=61.6+rnd()*1.8; busyUntil[i]=64.5; }
+  FIGS.push({slots,tiles,launch,release,tA:45.5,tB:63.6,keep:true,reset(){},prep(){},
+    target(j,t,o){ const i=tiles[j], u=clamp((t-launch[j]-0.22)/fd[j],0,1), fl=1-u;
+      o.x=mix(hx[i],gx[j],u)+0.06*Math.sin(t*2.3+ph[j])*fl;
+      o.y=mix(hy[i],gy[j],sstep(0,1,u));
+      o.z=mix(0.06,hz[i]+TH*1.05,u)+0.12*Math.sin(Math.PI*u);
+      o.rx=0.9*Math.sin(t*3.1+ph[j])*fl; o.ry=1.2*Math.sin(t*2.2+ph[j]*1.7)*fl; o.rz=hrz[i]+rr[j]*u+0.6*Math.sin(t*1.7+ph[j])*fl;
+      o.k=u<1?80:140; }});
+})();
+
+// ---- WINTER (60 – 77s): Wollman-style skaters, cardinals, puffers and a sled
+[['skater1',0],['skater2',Math.PI]].forEach(([d,p0])=>addSprite(d,(t,o)=>{
+  const a=sstep(64,66,t), w=TAU/9, q=(t-64)*w+p0;
+  o[0]=0.36*Math.sin(q)*a; o[1]=-0.12+0.035*Math.sin(2*q)*a; return o; },62.3,75,{gait:'skate',timePhase:2.4,ph0:p0,z:0.16}));
+addSprite('cardinal',walk(-0.6,0.3,bandY('cardinal'),65,73),63.2,74,{gait:'hop',stride:0.06});
+addSprite('cardinal',walk(0.62,0.38,bandY('cardinal'),66,70),64.4,73.6,{gait:'hop',stride:0.05,ph0:1});
+addSprite('puffer',walk(-0.6,0.5,footY('puffer'),64.5,75.5),62.6,75.6,{gait:'walk',stride:0.1});
+addSprite('snowkid',walk(0.45,-0.42,footY('snowkid'),65,75),63,75.3,{gait:'walk',stride:0.07,z:0.17});
+addSprite('sled',walk(0.66,-0.21,-0.935+1.5*SP,65,75),63,75.3,{gait:'none',z:0.15,face:1});
+
+// raindrop pops on the lake in early spring
+const popAt=new Float32Array(NT).fill(-99);
+(function(){ const lake=[]; for(let i=0;i<NT;i++) if (lakeT[i]&&!protect[i]) lake.push(i);
+  for (let q=0;q<16;q++){ const i=lake[Math.floor(rnd()*lake.length)]; popAt[i]=1.6+q*0.32+rnd()*0.2; } })();
+
+// ---------------------------------------------------------------- simulation
+const DT=1/120;
+let simT=0, clicksPending=0;
+const W=[];
+function setFace(i,f,src){ const o=i*8+f*4, s=src; faces[o]=s[0];faces[o+1]=s[1];faces[o+2]=s[2];faces[o+3]=s[3]; facesDirty=true; }
+function resetSim(){
+  for (let i=0;i<NT;i++){ px[i]=hx[i];py[i]=hy[i];pz[i]=hz[i];vx[i]=vy[i]=vz[i]=0;
+    arx[i]=hrx[i];ary[i]=hry[i];arz[i]=hrz[i];wx[i]=wy[i]=wz[i]=0;tau[i]=0;flash[i]=0;ret[i]=0;ownPrev[i]=-1;
+    hFace[i]=0; ryBase[i]=0; seasonOf[i]=0; lastFlip[i]=-99;
+    for (let c=0;c<4;c++){ faces[i*8+c]=SC[0][i*4+c]; faces[i*8+4+c]=SC[0][i*4+c]; } }
+  facesDirty=true; FIGS.forEach(f=>f.reset()); simT=0; clicksPending=0;
+}
+const SRC=[0,0,0,0];
+function stepSim(t){
+  const dt=DT;
+  ownNow.fill(-1);
+  for (let f=0;f<FIGS.length;f++){ const F=FIGS[f];
+    F.on=t>=F.tA-0.01&&t<=F.tB; if (!F.on) continue;
+    F.prep(t,dt);
+    const L=F.launch,R=F.release,T=F.tiles;
+    for (let j=0;j<T.length;j++) if (t>=L[j]&&t<R[j]){ ownNow[T[j]]=f; slotOf[T[j]]=j; }
+  }
+  for (let i=0;i<NT;i++){
+    const own=ownNow[i];
+    // ---- the season wave reaches this tile
+    while (seasonOf[i]<4 && t>=flipT[seasonOf[i]*NT+i]+0.12){
+      const ns=seasonOf[i]+1, S=SC[ns%4];
+      SRC[0]=S[i*4];SRC[1]=S[i*4+1];SRC[2]=S[i*4+2];SRC[3]=S[i*4+3];
+      const showingHome=!(own>=0&&!FIGS[own].keep);
+      if (showingHome){ const hid=1-hFace[i]; setFace(i,hid,SRC); hFace[i]=hid; ryBase[i]+=Math.PI; if (own<0&&!ret[i]) ret[i]=1; }
+      else setFace(i,hFace[i],SRC);
+      lastFlip[i]=flipT[seasonOf[i]*NT+i]; seasonOf[i]=ns;
+    }
+    let tx,ty,tz,trx,tryy,trz,k,zeta=0.78;
+    if (own>=0){
+      const F=FIGS[own], j=slotOf[i];
+      if (ownPrev[i]!==own && !F.keep){ const s=F.slots[j]; SRC[0]=s.col[0];SRC[1]=s.col[1];SRC[2]=s.col[2];SRC[3]=0; setFace(i,1-hFace[i],SRC); }
+      if (t<F.launch[j]+0.22){ tx=hx[i];ty=hy[i];tz=hz[i]+0.075;trx=hrx[i];tryy=hry[i]+ryBase[i];trz=hrz[i];k=260;zeta=0.7; }
+      else { F.target(j,t,O); tx=O.x;ty=O.y;tz=O.z;trx=O.rx;tryy=O.ry+ryBase[i]+(F.keep?0:Math.PI);trz=O.rz;k=O.k; }
+      ret[i]=0;
+    } else {
+      if (ownPrev[i]>=0) ret[i]=1;
+      tx=hx[i];ty=hy[i];tz=hz[i];trx=hrx[i];tryy=hry[i]+ryBase[i];trz=hrz[i];k=110;zeta=0.75;
+      // lift while flipping to the next season
+      const pend=seasonOf[i]<4?flipT[seasonOf[i]*NT+i]:1e9;
+      const f0=t>=pend?pend:lastFlip[i], q=(t-f0)/0.9;
+      if (q>=0&&q<1){ tz+=0.06*Math.sin(Math.PI*q); }
+      const pa=popAt[i];
+      if (t>pa&&t<pa+1.6){ const u=(t-pa)/1.2; if (u<1){ tz+=0.09*Math.sin(Math.PI*u); tryy+=TAU*sstep(0.1,0.8,u);} if(!ret[i]) ret[i]=1; }
+      if (ret[i]){
+        const dxy=Math.hypot(px[i]-hx[i],py[i]-hy[i]);
+        tz+=0.3*sstep(0.02,0.5,dxy); k=60;
+        const d3=Math.hypot(dxy,pz[i]-hz[i]);
+        if (d3<0.035){ k=420; zeta=0.55; }
+        if (ret[i]===1&&d3>0.012) ret[i]=2;
+        const sp=Math.hypot(vx[i],vy[i],vz[i]);
+        if (ret[i]===2&&d3<0.0028&&sp<0.3){ ret[i]=0; flash[i]=1; clicksPending++; }
+      }
+    }
+    ownPrev[i]=own;
+    // ---- springs
+    let dx=tx-px[i], dy=ty-py[i], dz=tz-pz[i];
+    const dist=Math.hypot(dx,dy,dz), c=2*zeta*Math.sqrt(k);
+    let ax=k*dx-c*vx[i], ay=k*dy-c*vy[i], az=k*dz-c*vz[i];
+    if (dist>0.06){ const s=swirlS[i]*Math.min(dist,0.6)*9/dist; ax+=-dy*s; ay+=dx*s; }
+    const am=Math.hypot(ax,ay,az); if (am>36){ const s=36/am; ax*=s;ay*=s;az*=s; }
+    vx[i]+=ax*dt; vy[i]+=ay*dt; vz[i]+=az*dt;
+    const sp=Math.hypot(vx[i],vy[i],vz[i]); if (sp>2.4){ const s=2.4/sp; vx[i]*=s;vy[i]*=s;vz[i]*=s; }
+    px[i]+=vx[i]*dt; py[i]+=vy[i]*dt; pz[i]+=vz[i]*dt;
+    const kA=170, cA=2*0.72*Math.sqrt(kA);
+    wx[i]+=(kA*wrapP(trx-arx[i],TAU)-cA*wx[i])*dt; arx[i]+=wx[i]*dt;
+    wy[i]+=(kA*wrapP(tryy-ary[i],TAU)-cA*wy[i])*dt; ary[i]+=wy[i]*dt;
+    wz[i]+=(kA*wrapP(trz-arz[i],Math.PI/2)-cA*wz[i])*dt; arz[i]+=wz[i]*dt;
+    const ff=sstep(0.3,1.1,sp);
+    tau[i]+=dt*sp*spin[i]*ff;
+    tau[i]+=wrapP(-tau[i],TAU)*Math.min(1,dt*5)*(1-ff);
+    flash[i]*=1-dt*7;
+  }
+}
+function simTo(t,maxSteps){ let n=0; while (simT+DT<=t&&n<maxSteps){ stepSim(simT); simT+=DT; n++; } }
+function seek(t){ t=clamp(t,0,DURATION-0.01); if (t<simT) resetSim(); simTo(t,1e9); clicksPending=0; playT=t; }
+
+// ---------------------------------------------------------------- WebGL
+const canvas=document.getElementById('c');
+const gl=canvas.getContext('webgl2',{antialias:true,alpha:false});
+if (!gl){ const e=document.getElementById('err'); e.style.display='flex'; e.textContent='This film needs a browser with WebGL2.'; throw new Error('no webgl2'); }
+
+const COMMON=`
+precision highp float;
+uniform vec2 uRes; uniform float uFade; uniform float uTime;
+uniform vec3 uCam, uLdir, uLP, uLcol, uEnv;
+float hash(vec2 p){ p=fract(p*vec2(123.34,456.21)); p+=dot(p,p+45.32); return fract(p.x*p.y); }
+float vnoise(vec2 p){ vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);
+  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y); }
+float fbm(vec2 p){ float s=0.,a=.5; for(int i=0;i<4;i++){ s+=a*vnoise(p); p=p*2.03+17.1; a*=.5; } return s; }
+vec3 env(vec3 r){
+  float up=r.y*.5+.5;
+  vec3 c=mix(vec3(.035,.028,.022),vec3(.42,.32,.2),smoothstep(.25,1.,up))*uEnv;
+  c+=uLcol*1.6*pow(max(dot(r,uLdir),0.),28.);
+  c+=uLcol*1.3*pow(max(dot(r,normalize(uLP)),0.),70.);
+  c+=uEnv*.22*pow(max(r.z,0.),3.);
+  return c;
+}
+vec3 finish(vec3 c){
+  c=(c*(2.51*c+.03))/(c*(2.43*c+.59)+.14);
+  vec2 q=gl_FragCoord.xy/uRes-.5;
+  c*=mix(1.,smoothstep(.95,.18,length(q)),.5);
+  c=pow(clamp(c,0.,1.),vec3(1./2.2))*uFade;
+  c+=(hash(gl_FragCoord.xy+fract(uTime*7.1)*91.)-.5)/255.*2.5;
+  return c;
+}`;
+const VS_TILE=`#version 300 es
+layout(location=0) in vec3 aP; layout(location=1) in vec3 aN; layout(location=2) in float aF;
+layout(location=3) in vec3 iPos; layout(location=4) in vec4 iQ; layout(location=5) in float iFlash;
+layout(location=6) in vec4 iC0; layout(location=8) in vec4 iC1; layout(location=7) in vec4 iS;
+uniform mat4 uVP;
+out vec3 vW; out vec3 vN; out vec3 vT; out vec3 vB; out vec2 vUV;
+flat out float vFace; flat out vec4 vCol; flat out vec4 vInfo;
+vec3 qrot(vec4 q, vec3 v){ return v+2.*cross(q.xyz,cross(q.xyz,v)+q.w*v); }
+void main(){
+  vec3 w=iPos+qrot(iQ,aP*vec3(iS.x,iS.x,iS.y));
+  vW=w; vN=qrot(iQ,aN); vT=qrot(iQ,vec3(1,0,0)); vB=qrot(iQ,vec3(0,1,0));
+  vUV=aF<1.5?aP.xy+.5:(abs(aN.x)>.5?aP.yz+.5:aP.xz+.5);
+  vFace=aF; vCol=aF<.5?iC0:(aF<1.5?iC1:vec4(iC0.rgb,-1.));
+  vInfo=vec4(iS.z,0.,iFlash,iPos.z-iS.y*.5);
+  gl_Position=uVP*vec4(w,1);
+}`;
+const FS_TILE=`#version 300 es
+${COMMON}
+uniform sampler2D uShadow;
+in vec3 vW; in vec3 vN; in vec3 vT; in vec3 vB; in vec2 vUV;
+flat in float vFace; flat in vec4 vCol; flat in vec4 vInfo;
+out vec4 frag;
+void main(){
+  float seed=vInfo.x;
+  bool side=vCol.a<-.5, metal=vCol.a>.5;
+  vec3 N=normalize(vN), T=normalize(vT), B=normalize(vB);
+  vec2 e=(vUV-.5)*2., bev=sign(e)*pow(abs(e),vec2(7.));
+  vec2 sd=vUV*5.+seed*37.;
+  float n0=vnoise(sd), gx=vnoise(sd+vec2(.07,0))-n0, gy=vnoise(sd+vec2(0,.07))-n0;
+  vec3 n=N;
+  if(!side) n=normalize(N+(T*bev.x+B*bev.y)*(metal?.35:.75)+(T*gx+B*gy)*(metal?3.2:.8));
+  vec3 V=normalize(uCam-vW);
+  float diff=max(dot(n,uLdir),0.);
+  vec3 H=normalize(normalize(uLP-vW)+V);
+  float nh=max(dot(n,H),0.), fres=pow(1.-max(dot(n,V),0.),5.);
+  vec3 R=reflect(-V,n);
+  float lift=vInfo.w, sh=1.;
+  if(lift<.03){ float s=texture(uShadow,vW.xy/2.6+.5).r; sh=1.-.72*min(s,1.)*(1.-smoothstep(0.,.03,lift)); }
+  vec3 col;
+  if(side){
+    col=vCol.rgb*.5*(.18+.7*max(dot(N,uLdir),0.))*sh;
+  } else if(metal){
+    vec3 g=vCol.rgb*1.15;
+    float crk=smoothstep(.55,.6,vnoise(vUV*9.+seed*11.))*.35;
+    float seam=smoothstep(.035,.0,abs(fract(vUV.x*1.5+seed+.08*vnoise(vUV*6.))-.5)-.46)*.25;
+    g*=1.-crk*.5-seam;
+    col=g*(.07+.24*diff*sh)+g*env(R)*.95*mix(.55,1.,sh)+g*uLcol*pow(nh,50.)*3.*sh+vec3(1.)*fres*.12;
+  } else {
+    vec3 base=vCol.rgb*(.8+.4*fbm(vUV*2.3+seed*31.));
+    vec2 bc=vUV*3.+seed*7.;
+    base*=1.+.5*smoothstep(.12,.0,length(fract(bc)-.5))*step(.82,hash(floor(bc)));
+    col=base*(.22+.95*diff*sh)*uLcol+base*.16*uEnv+uLcol*pow(nh,90.)*1.5*(.3+fres)*sh+env(R)*(.035+.6*fres);
+  }
+  col+=vec3(1.,.82,.5)*vInfo.z*.45;
+  frag=vec4(finish(col),1.);
+}`;
+const VS_WALL=`#version 300 es
+layout(location=0) in vec2 aP; uniform mat4 uVP; out vec3 vW;
+void main(){ vW=vec3(aP*2.2,0.); gl_Position=uVP*vec4(vW,1.); }`;
+const FS_WALL=`#version 300 es
+${COMMON}
+uniform sampler2D uShadow, uDesign;
+in vec3 vW; out vec4 frag;
+float lum(vec2 uv){ return dot(texture(uDesign,uv).rgb,vec3(.3,.55,.15)); }
+void main(){
+  vec2 p=vW.xy; float m=max(abs(p.x),abs(p.y));
+  float n=fbm(p*14.)*.6+fbm(p*80.)*.4;
+  vec3 base=vec3(.2,.185,.165)*(.75+.4*n);
+  vec2 uv=p*.5+.5; float d=.7/72.;
+  float g=abs(lum(uv+vec2(d,0))-lum(uv-vec2(d,0)))+abs(lum(uv+vec2(0,d))-lum(uv-vec2(0,d)));
+  float inside=1.-smoothstep(.985,1.,m);
+  base=mix(base,vec3(.42,.1,.045),smoothstep(.06,.22,g)*(.45+.55*vnoise(p*45.))*.75*inside);
+  vec2 gr=abs(fract(p*36.)-.5);
+  base*=1.-.08*smoothstep(.44,.5,max(gr.x,gr.y))*inside;
+  vec4 s=texture(uShadow,p/2.6+.5);
+  float sh=1.-.7*min(s.r,1.), ao=1.-.62*min(s.g,1.);
+  vec3 col=base*(.14+.85*max(uLdir.z,0.)*.9*sh)*ao*uLcol;
+  col*=mix(.12,1.,inside); col*=1.-smoothstep(1.02,1.7,m);
+  frag=vec4(finish(col),1.);
+}`;
+const VS_SH=`#version 300 es
+layout(location=0) in vec2 aC; layout(location=3) in vec3 iPos; layout(location=7) in vec4 iS;
+uniform vec3 uLdir;
+out vec2 vQ; out vec2 vA; out float vH; out float vSz;
+void main(){
+  float h=max(iPos.z-iS.y*.5,0.);
+  vec2 off=-uLdir.xy/uLdir.z*iPos.z, c=iPos.xy+off;
+  float hs=iS.x*.5*(1.3+h*3.)+.01+length(off);
+  vQ=aC*hs; vA=-off; vH=h; vSz=iS.x;
+  gl_Position=vec4((c+aC*hs)/1.3,0.,1.);
+}`;
+const FS_SH=`#version 300 es
+precision highp float;
+in vec2 vQ; in vec2 vA; in float vH; in float vSz; out vec4 frag;
+float box(vec2 p,float b){ vec2 d=abs(p)-b; return length(max(d,0.))+min(max(d.x,d.y),0.); }
+void main(){
+  float blur=.004+vH*.13;
+  float s=(1.-smoothstep(-blur,blur,box(vQ,vSz*.5*(1.+vH*1.2))))*.9*smoothstep(.003,.025,vH)/(1.+vH*4.);
+  float a=(1.-smoothstep(-.004,.012,box(vQ-vA,vSz*.5)))*.8*(1.-smoothstep(0.,.025,vH));
+  frag=vec4(s,a,0.,1.);
+}`;
+// weather: 0 petals, 1 fireflies, 2 autumn motes, 3 snow
+const VS_MOTE=`#version 300 es
+uniform mat4 uVP; uniform float uTime, uPx, uType;
+out vec4 vC;
+float h(float n){ return fract(sin(n*12.9898)*43758.5453); }
+void main(){
+  float id=float(gl_VertexID)+uType*1000.;
+  float a=h(id), b=h(id+.3), c=h(id+.7), d=h(id+.9);
+  vec3 p; vec3 col; float sz=1., al=1.;
+  if (uType<.5){ p=vec3(a*2.4-1.2, 1.2-mod(uTime*(.05+.05*d)+b*2.4,2.4), .08+c*1.0);
+    p.x+=.08*sin(uTime*.8+id); col=vec3(1.,.66,.78); sz=1.4+d; al=.85; }
+  else if (uType<1.5){ p=vec3(a*1.5-.75, -.5+b*.75, .05+c*.45);
+    p.xy+=.05*vec2(sin(uTime*.4+id*3.),cos(uTime*.33+id));
+    col=vec3(.75,1.,.3); sz=1.2+d; al=pow(.5+.5*sin(uTime*(1.+d*2.)+id*5.),8.)*1.6; }
+  else if (uType<2.5){ p=vec3(a*2.6-1.3, 1.2-mod(uTime*(.03+.03*d)+b*2.4,2.4), .1+c*1.1);
+    p.x+=.1*sin(uTime*.5+id); col=vec3(1.,.72,.4); sz=.9+d; al=.4; }
+  else { p=vec3(a*2.6-1.3, 1.25-mod(uTime*(.10+.12*d)+b*2.5,2.5), .06+c*1.2);
+    p.x+=.05*sin(uTime*(.6+d)+id); col=vec3(1.); sz=.8+1.8*d*d; al=.9; }
+  vec4 cp=uVP*vec4(p,1.); gl_Position=cp;
+  gl_PointSize=uPx*sz/cp.w*4.;
+  vC=vec4(col,al);
+}`;
+const FS_MOTE=`#version 300 es
+precision highp float; uniform float uFade, uW, uType; in vec4 vC; out vec4 frag;
+void main(){ float a=smoothstep(.5,.1,length(gl_PointCoord-.5))*vC.a*uW*uFade;
+  frag = (uType>.5&&uType<1.5) ? vec4(vC.rgb*a,0.) : vec4(vC.rgb*a*.85,a*.85); }`;
+
+function compile(vs,fs){
+  const p=gl.createProgram();
+  for (const [t,src] of [[gl.VERTEX_SHADER,vs],[gl.FRAGMENT_SHADER,fs]]){
+    const s=gl.createShader(t); gl.shaderSource(s,src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s,gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+    gl.attachShader(p,s);
+  }
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p,gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  const u={}, n=gl.getProgramParameter(p,gl.ACTIVE_UNIFORMS);
+  for (let i=0;i<n;i++){ const a=gl.getActiveUniform(p,i); u[a.name]=gl.getUniformLocation(p,a.name); }
+  return {p,u};
+}
+const progTile=compile(VS_TILE,FS_TILE), progWall=compile(VS_WALL,FS_WALL),
+      progSh=compile(VS_SH,FS_SH), progMote=compile(VS_MOTE,FS_MOTE);
+
+const boxData=[];
+for (const [n,f] of [[[0,0,1],0],[[0,0,-1],1],[[1,0,0],2],[[-1,0,0],2],[[0,1,0],2],[[0,-1,0],2]]){
+  const u=n[0]?[0,1,0]:[1,0,0], v=[n[1]*u[2]-n[2]*u[1],n[2]*u[0]-n[0]*u[2],n[0]*u[1]-n[1]*u[0]];
+  const corner=(a,b)=>[0,1,2].map(q=>n[q]*.5+u[q]*a*.5+v[q]*b*.5);
+  for (const c of [corner(-1,-1),corner(1,-1),corner(1,1),corner(-1,-1),corner(1,1),corner(-1,1)]) boxData.push(...c,...n,f);
+}
+const mkBuf=(data,usage)=>{ const b=gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,b); gl.bufferData(gl.ARRAY_BUFFER,data,usage); return b; };
+const boxBuf=mkBuf(new Float32Array(boxData),gl.STATIC_DRAW);
+const dyn=new Float32Array(NT*8);
+const dynBuf=mkBuf(dyn.byteLength,gl.DYNAMIC_DRAW);
+const faceBuf=mkBuf(faces.byteLength,gl.DYNAMIC_DRAW);
+const statBuf=mkBuf(stat,gl.STATIC_DRAW);
+const quadBuf=mkBuf(new Float32Array([-1,-1,1,-1,1,1,-1,-1,1,1,-1,1]),gl.STATIC_DRAW);
+function attr(loc,size,stride,off,div){ gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc,size,gl.FLOAT,false,stride,off); gl.vertexAttribDivisor(loc,div); }
+function instAttribs(){
+  gl.bindBuffer(gl.ARRAY_BUFFER,dynBuf); attr(3,3,32,0,1); attr(4,4,32,12,1); attr(5,1,32,28,1);
+  gl.bindBuffer(gl.ARRAY_BUFFER,faceBuf); attr(6,4,32,0,1); attr(8,4,32,16,1);
+  gl.bindBuffer(gl.ARRAY_BUFFER,statBuf); attr(7,4,16,0,1);
+}
+const vaoTile=gl.createVertexArray(); gl.bindVertexArray(vaoTile);
+gl.bindBuffer(gl.ARRAY_BUFFER,boxBuf); attr(0,3,28,0,0); attr(1,3,28,12,0); attr(2,1,28,24,0); instAttribs();
+const vaoSh=gl.createVertexArray(); gl.bindVertexArray(vaoSh);
+gl.bindBuffer(gl.ARRAY_BUFFER,quadBuf); attr(0,2,8,0,0); instAttribs();
+const vaoWall=gl.createVertexArray(); gl.bindVertexArray(vaoWall);
+gl.bindBuffer(gl.ARRAY_BUFFER,quadBuf); attr(0,2,8,0,0);
+const vaoEmpty=gl.createVertexArray();
+gl.bindVertexArray(null);
+
+function mkTex(w,h,data){ const t=gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D,t);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,w,h,0,gl.RGBA,gl.UNSIGNED_BYTE,data);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE); return t; }
+const SHN=1024, shTex=mkTex(SHN,SHN,null);
+const shFB=gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER,shFB);
+gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,shTex,0);
+gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+const dTex=mkTex(N,N,designTex[0]); let dTexSeason=0;
+
+// ---------------------------------------------------------------- camera, light, seasons
+function perspective(fov,asp,n,f){ const t=1/Math.tan(fov/2); return [t/asp,0,0,0,0,t,0,0,0,0,(f+n)/(n-f),-1,0,0,2*f*n/(n-f),0]; }
+function lookAt(e,c,u){
+  let z=[e[0]-c[0],e[1]-c[1],e[2]-c[2]]; let l=Math.hypot(...z); z=z.map(v=>v/l);
+  let x=[u[1]*z[2]-u[2]*z[1],u[2]*z[0]-u[0]*z[2],u[0]*z[1]-u[1]*z[0]]; l=Math.hypot(...x); x=x.map(v=>v/l);
+  const y=[z[1]*x[2]-z[2]*x[1],z[2]*x[0]-z[0]*x[2],z[0]*x[1]-z[1]*x[0]];
+  return [x[0],y[0],z[0],0,x[1],y[1],z[1],0,x[2],y[2],z[2],0,
+    -(x[0]*e[0]+x[1]*e[1]+x[2]*e[2]),-(y[0]*e[0]+y[1]*e[1]+y[2]*e[2]),-(z[0]*e[0]+z[1]*e[1]+z[2]*e[2]),1];
+}
+function mul4(a,b){ const o=new Array(16); for(let c=0;c<4;c++)for(let r=0;r<4;r++){let s=0;for(let k=0;k<4;k++)s+=a[k*4+r]*b[c*4+k];o[c*4+r]=s;} return o; }
+// continuous season value 0..4
+const seasonV=t=>TRANS.reduce((a,T)=>a+sstep(T,T+2.8,t),0);
+function lerpSeason(tab,sv){ const i=Math.min(3,Math.floor(sv)), f=sv-i; return mixc(tab[i],tab[i+1],f); }
+const LCOL=[[1,.94,.84],[1,.88,.66],[1,.76,.54],[.8,.88,1],[1,.94,.84]];
+const ENVT=[[1,.95,.85],[1.1,.95,.75],[1.05,.8,.6],[.75,.85,1.1],[1,.95,.85]];
+const LDIR=[[-.42,.55,.9],[-.15,.75,.85],[-.75,.35,.8],[-.55,.3,.95],[-.42,.55,.9]];
+function cameraAt(t){
+  const intro=1-sstep5(t/9);
+  let yaw=0.03*Math.sin(t*0.13), pitch=0.02*Math.sin(t*0.17+1), dist=4.28+0.6*intro;
+  TRANS.forEach((T,k)=>{ const b=bump(t,T-0.5,T+1.3,T+2.8,T+4.6); yaw+=0.11*(k%2?-1:1)*b; pitch+=0.05*b; dist+=0.12*b; });
+  return {eye:[dist*Math.sin(yaw)*Math.cos(pitch),-dist*Math.sin(pitch)*0.6,dist*Math.cos(yaw)*Math.cos(pitch)],tgt:[0,0,0]};
+}
+function lightAt(t){ const sweep=sstep(0,7,t); return [mix(-2.2,0,sweep)+1.6*Math.sin(t*0.19)*sweep,0.55+0.6*Math.sin(t*0.11+0.5),1.6]; }
+
+// ---------------------------------------------------------------- audio (synthesised)
+let AC=null, master=null, noiseBuf=null, drone=null, soundOn=false, oscs=[], chordIdx=-1;
+const CHORDS=[[110,138.6,164.8,220],[146.8,185,220,293.7],[110,130.8,164.8,220],[82.4,98,123.5,164.8]];
+function initAudio(){
+  AC=new (window.AudioContext||window.webkitAudioContext)();
+  master=AC.createGain(); master.gain.value=0.9;
+  const dl=AC.createDelay(0.5); dl.delayTime.value=0.083; const fb=AC.createGain(); fb.gain.value=0.28;
+  const lp=AC.createBiquadFilter(); lp.type='lowpass'; lp.frequency.value=3200;
+  master.connect(AC.destination); master.connect(dl); dl.connect(lp); lp.connect(fb); fb.connect(dl); lp.connect(AC.destination);
+  noiseBuf=AC.createBuffer(1,AC.sampleRate*0.06,AC.sampleRate);
+  const d=noiseBuf.getChannelData(0); for (let i=0;i<d.length;i++) d[i]=(Math.random()*2-1)*Math.pow(1-i/d.length,3);
+  drone=AC.createGain(); drone.gain.value=0;
+  const dlp=AC.createBiquadFilter(); dlp.type='lowpass'; dlp.frequency.value=700;
+  [0.5,0.32,0.22,0.12].forEach((a,k)=>{ const o=AC.createOscillator(); o.type='triangle'; o.frequency.value=CHORDS[0][k];
+    const g=AC.createGain(); g.gain.value=a; o.connect(g); g.connect(dlp); o.start(); oscs.push(o); });
+  dlp.connect(drone); drone.connect(master);
+}
+function click(vol){
+  const t=AC.currentTime;
+  const s=AC.createBufferSource(); s.buffer=noiseBuf; s.playbackRate.value=0.6+Math.random()*0.9;
+  const f=AC.createBiquadFilter(); f.type='bandpass'; f.frequency.value=1800+Math.random()*3800; f.Q.value=4;
+  const g=AC.createGain(); g.gain.setValueAtTime(vol,t); g.gain.exponentialRampToValueAtTime(0.0005,t+0.05);
+  s.connect(f); f.connect(g); g.connect(master); s.start(t);
+  if (Math.random()<0.35){ const o=AC.createOscillator(); o.type='sine'; o.frequency.value=2400+Math.random()*2600;
+    const og=AC.createGain(); og.gain.setValueAtTime(vol*0.18,t); og.gain.exponentialRampToValueAtTime(0.0003,t+0.09);
+    o.connect(og); og.connect(master); o.start(t); o.stop(t+0.1); }
+}
+
+// ---------------------------------------------------------------- frame
+let W_=0,H_=0;
+function resize(){
+  const dpr=Math.min(window.devicePixelRatio||1,2), s=Math.floor(Math.min(window.innerWidth,window.innerHeight));
+  canvas.style.width=s+'px'; canvas.style.height=s+'px'; W_=H_=Math.floor(s*dpr); canvas.width=W_; canvas.height=H_;
+}
+window.addEventListener('resize',resize); resize();
+
+function buildInstances(){
+  for (let i=0;i<NT;i++){
+    const o=i*8;
+    dyn[o]=px[i]; dyn[o+1]=py[i]; dyn[o+2]=pz[i];
+    const hz_=arz[i]*0.5, hx_=arx[i]*0.5, hy_=ary[i]*0.5, ht=tau[i]*0.5;
+    const cz=Math.cos(hz_),sz=Math.sin(hz_),cx=Math.cos(hx_),sx=Math.sin(hx_),cy=Math.cos(hy_),sy=Math.sin(hy_);
+    const aw=cz*cx, ax=cz*sx, ay=sz*sx, az=sz*cx;
+    const bw=aw*cy-ay*sy, bx=ax*cy-az*sy, by=aw*sy+ay*cy, bz=az*cy+ax*sy;
+    const ct=Math.cos(ht), st=Math.sin(ht), tx=Math.cos(tumPsi[i])*st, ty=Math.sin(tumPsi[i])*st;
+    dyn[o+6]=bw*ct-bx*tx-by*ty; dyn[o+3]=bw*tx+bx*ct-bz*ty; dyn[o+4]=bw*ty+by*ct+bz*tx; dyn[o+5]=bz*ct+bx*ty-by*tx;
+    dyn[o+7]=flash[i];
+  }
+}
+
+let playT=0, playing=true, last=performance.now(), hintShown=performance.now();
+const bar=document.getElementById('bar'), hint=document.getElementById('hint');
+
+function render(t){
+  const {eye,tgt}=cameraAt(t);
+  const VP=mul4(perspective(30*Math.PI/180,1,0.1,30),lookAt(eye,tgt,[0,1,0]));
+  const sv=seasonV(t), LP=lightAt(t);
+  const Lcol=lerpSeason(LCOL,sv), Env=lerpSeason(ENVT,sv);
+  let Ld=lerpSeason(LDIR,sv); const ll=Math.hypot(...Ld); Ld=Ld.map(v=>v/ll);
+  const fade=sstep(0,2.4,t)*(1-sstep(78.4,79.9,t));
+  buildInstances();
+  gl.bindBuffer(gl.ARRAY_BUFFER,dynBuf); gl.bufferSubData(gl.ARRAY_BUFFER,0,dyn);
+  if (facesDirty){ gl.bindBuffer(gl.ARRAY_BUFFER,faceBuf); gl.bufferSubData(gl.ARRAY_BUFFER,0,faces); facesDirty=false; }
+  const si=Math.round(sv)%4;
+  if (si!==dTexSeason){ gl.bindTexture(gl.TEXTURE_2D,dTex); gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,N,N,gl.RGBA,gl.UNSIGNED_BYTE,designTex[si]); dTexSeason=si; }
+
+  gl.bindFramebuffer(gl.FRAMEBUFFER,shFB); gl.viewport(0,0,SHN,SHN);
+  gl.clearColor(0,0,0,1); gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.disable(gl.DEPTH_TEST); gl.enable(gl.BLEND); gl.blendFunc(gl.ONE,gl.ONE);
+  gl.useProgram(progSh.p); gl.uniform3fv(progSh.u.uLdir,Ld);
+  gl.bindVertexArray(vaoSh); gl.drawArraysInstanced(gl.TRIANGLES,0,6,NT);
+  gl.disable(gl.BLEND);
+
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null); gl.viewport(0,0,W_,H_);
+  gl.clearColor(0.012,0.009,0.007,1); gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+  gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL);
+  const setCommon=pr=>{ const u=pr.u; gl.useProgram(pr.p);
+    gl.uniformMatrix4fv(u.uVP,false,VP); if(u.uRes) gl.uniform2f(u.uRes,W_,H_);
+    if(u.uFade) gl.uniform1f(u.uFade,fade); if(u.uTime) gl.uniform1f(u.uTime,t);
+    if(u.uCam) gl.uniform3fv(u.uCam,eye); if(u.uLdir) gl.uniform3fv(u.uLdir,Ld);
+    if(u.uLP) gl.uniform3fv(u.uLP,LP); if(u.uLcol) gl.uniform3fv(u.uLcol,Lcol); if(u.uEnv) gl.uniform3fv(u.uEnv,Env); };
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,shTex);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D,dTex);
+  setCommon(progWall); gl.uniform1i(progWall.u.uShadow,0); gl.uniform1i(progWall.u.uDesign,1);
+  gl.bindVertexArray(vaoWall); gl.drawArrays(gl.TRIANGLES,0,6);
+  setCommon(progTile); gl.uniform1i(progTile.u.uShadow,0);
+  gl.bindVertexArray(vaoTile); gl.drawArraysInstanced(gl.TRIANGLES,0,36,NT);
+  // weather
+  gl.enable(gl.BLEND); gl.blendFunc(gl.ONE,gl.ONE_MINUS_SRC_ALPHA); gl.depthMask(false);
+  setCommon(progMote); gl.uniform1f(progMote.u.uPx,H_/220);
+  const ws=[Math.max(1-sstep(TRANS[0],TRANS[0]+3,t),sstep(TRANS[3],TRANS[3]+2,t))*0.8,
+    bump(t,TRANS[0]+1,TRANS[0]+6,TRANS[1],TRANS[1]+2), bump(t,TRANS[1]+1,TRANS[1]+3,TRANS[2],TRANS[2]+2),
+    bump(t,TRANS[2]+0.5,TRANS[2]+3,TRANS[3],TRANS[3]+1.5)];
+  const counts=[260,140,180,900];
+  gl.bindVertexArray(vaoEmpty);
+  for (let k=0;k<4;k++) if (ws[k]>0.01){ gl.uniform1f(progMote.u.uType,k); gl.uniform1f(progMote.u.uW,ws[k]); gl.drawArrays(gl.POINTS,0,counts[k]); }
+  gl.depthMask(true); gl.disable(gl.BLEND); gl.bindVertexArray(null);
+}
+
+function frame(now){
+  const dt=Math.min(0.1,(now-last)/1000); last=now;
+  if (playing){ playT+=dt; if (playT>=DURATION){ playT=0; resetSim(); } }
+  if (playT<simT) resetSim();
+  simTo(playT,1200);
+  if (soundOn&&AC){
+    const n=Math.min(clicksPending,5);
+    for (let q=0;q<n;q++) click(0.22*Math.min(1,0.4+clicksPending/12)*(0.6+Math.random()*0.4));
+    let air=0; for (let i=0;i<NT;i+=7) if (pz[i]>hz[i]+0.03) air++;
+    drone.gain.setTargetAtTime((0.02+0.08*air/(NT/7))*sstep(0,3,playT)*(1-sstep(77.5,80,playT)),AC.currentTime,0.4);
+    const ci=Math.round(seasonV(playT))%4;
+    if (ci!==chordIdx){ chordIdx=ci; oscs.forEach((o,k)=>o.frequency.setTargetAtTime(CHORDS[ci][k],AC.currentTime,0.8)); }
+  }
+  clicksPending=0;
+  render(playT);
+  bar.style.width=(playT/DURATION*100)+'%';
+  if (now-hintShown>4500) hint.style.opacity=0;
+  requestAnimationFrame(frame);
+}
+
+canvas.addEventListener('click',()=>{
+  if (!AC){ try{ initAudio(); }catch(e){} }
+  if (AC){ soundOn=!soundOn; if (soundOn) AC.resume(); else drone.gain.setTargetAtTime(0,AC.currentTime,0.1); }
+});
+window.addEventListener('keydown',e=>{
+  if (e.code==='Space'){ playing=!playing; e.preventDefault(); }
+  else if (e.code==='ArrowRight') seek(playT+5);
+  else if (e.code==='ArrowLeft') seek(playT-5);
+  else if (e.code==='KeyR'){ resetSim(); playT=0; }
+  hint.style.opacity=1; hintShown=performance.now();
+});
+
+resetSim();
+const qs=new URLSearchParams(location.search);
+if (qs.has('t')) seek(parseFloat(qs.get('t'))||0);
+if (qs.has('pause')) playing=false;
+window.__film={seek,render:()=>render(playT),get t(){return playT;}};
+if (!qs.has('still')) requestAnimationFrame(t=>{last=t;frame(t);}); else render(playT);
+</script>
+</body>
+</html>
